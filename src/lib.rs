@@ -158,6 +158,7 @@ impl Build {
         }
 
         let os = match target {
+            "aarch64-apple-darwin" => "darwin64-arm64-cc",
             // Note that this, and all other android targets, aren't using the
             // `android64-aarch64` (or equivalent) builtin target. That
             // apparently has a crazy amount of build logic in OpenSSL 1.1.1
@@ -447,6 +448,11 @@ fn cp_r(src: &Path, dst: &Path) {
 }
 
 fn apply_patches(target: &str, inner: &Path) {
+    apply_patches_musl(target, inner);
+    apply_patches_aarch64_apple_darwin(target, inner);
+}
+
+fn apply_patches_musl(target: &str, inner: &Path) {
     if !target.contains("musl") {
         return;
     }
@@ -460,6 +466,44 @@ fn apply_patches(target: &str, inner: &Path) {
     let buf = buf
         .replace("asm/unistd.h", "sys/syscall.h")
         .replace("__NR_getrandom", "SYS_getrandom");
+
+    File::create(&path)
+        .unwrap()
+        .write_all(buf.as_bytes())
+        .unwrap();
+}
+
+fn apply_patches_aarch64_apple_darwin(target: &str, inner: &Path) {
+    if target != "aarch64-apple-darwin" {
+        return;
+    }
+
+    // Apply build system changes to allow configuring and building
+    // for Apple's ARM64 platform.
+    // https://github.com/openssl/openssl/pull/12369
+
+    let mut buf = String::new();
+    let path = inner.join("Configurations/10-main.conf");
+    File::open(&path).unwrap().read_to_string(&mut buf).unwrap();
+
+    assert!(
+        !buf.contains("darwin64-arm64-cc"),
+        "{} already contains instructions for aarch64-apple-darwin",
+        path.display(),
+    );
+
+    const PATCH: &'static str = r#"
+    "darwin64-arm64-cc" => {
+        inherit_from     => [ "darwin-common", asm("aarch64_asm") ],
+        CFLAGS           => add("-Wall"),
+        cflags           => add("-arch arm64"),
+        lib_cppflags     => add("-DL_ENDIAN"),
+        bn_ops           => "SIXTY_FOUR_BIT_LONG",
+        perlasm_scheme   => "ios64",
+    },"#;
+
+    let x86_64_stanza = buf.find(r#"    "darwin64-x86_64-cc""#).unwrap();
+    buf.insert_str(x86_64_stanza, PATCH);
 
     File::create(&path)
         .unwrap()
